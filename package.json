@@ -65,6 +65,7 @@
     "@swc/cli": "0.1.57",
     "@swc/core": "1.2.185",
     "@tsconfig/node16": "1.0.2",
+    "@types/abs-svg-path": "0.1.0",
     "@types/audioworklet": "0.0.28",
     "@types/jest": "27.5.1",
     "@types/node": "17.0.34",
@@ -93,6 +94,8 @@
     "wtr-plugin-vite": "^0.0.3"
   },
   "dependencies": {
+    "alice-bob": "file:../alice-bob",
+    "animatrix": "file:../animatrix",
     "everyday-utils": "file:../everyday-utils",
     "fast-html-element": "file:../fast-html-element",
     "find-shortest-path": "file:../find-shortest-path",
@@ -100,6 +103,7 @@
     "mixter": "file:../mixter",
     "pick-omit": "file:../pick-omit",
     "plugs-and-cables": "file:../plugs-and-cables",
+    "serialize-whatever": "file:../serialize-whatever",
     "shape-points": "3.0.4",
     "svg-round-corners": "0.3.0",
     "x-workspace": "file:../x-workspace"

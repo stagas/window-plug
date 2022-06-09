@@ -1,21 +1,25 @@
 /** @jsxImportSource mixter/jsx */
-// import { chunk } from 'everyday-utils'
+import { AnimSettings, createStepAnimation, StepAnimation } from 'animatrix'
 import { FastHTMLElement } from 'fast-html-element'
-import { findShortestPath, Heuristics, Strategy } from 'find-shortest-path'
-import { Line, Point, Rect } from 'geometrik'
+import { Morph, Point, Polygon, Rect } from 'geometrik'
 import { chain, dataset, dispatch, EventHandler, events, mixter, on, props, shadow, state } from 'mixter'
-import { jsx } from 'mixter/jsx'
+import { jsx, refs } from 'mixter/jsx'
 import { pick } from 'pick-omit'
 import { Cable, Plug, PlugKind } from 'plugs-and-cables'
-// import * as ShapePoints from 'shape-points'
 import { roundCorners } from 'svg-round-corners'
 import { SurfaceElement, WorkspaceWindowElement } from 'x-workspace'
+import type { Arrow, WindowPlugSolveOptions } from './types'
+import { createWindowPlugWorker } from './window-plug-core'
 
 export type WindowPlugEvents = {
   statechange: CustomEvent
   connectstart: CustomEvent
   connectmove: CustomEvent
   connectend: CustomEvent
+}
+
+export type WindowPlugArrowEvents = {
+  change: CustomEvent
 }
 
 export class WindowPlugContext {
@@ -25,26 +29,117 @@ export class WindowPlugContext {
 export class WindowPlugArrowElement extends mixter(
   HTMLElement,
   shadow(),
+  events<WindowPlugArrowElement, WindowPlugEvents>(),
   props(
     class {
       color = '#66a'
       step?: number
       rect?: Rect
       points?: Point[]
+      atRest = true
+
+      svg?: SVGSVGElement
+      svgPath?: SVGPathElement
+
+      offset?: Point
       path?: string
+      animPath?: string
+
+      getSaSb?: () => readonly [Point, Point]
+
+      anim?: StepAnimation<{ rect: Rect; points: Point[] }>
+      animValues?: { rect: Rect; points: Point[] }
+      animSettings: Record<string, AnimSettings> = {
+        rest: {
+          duration: 600,
+          easing: [0.32, 0, 0.15, 1], // Easing.Linear,
+        },
+        quick: {
+          duration: 200,
+          easing: [0.32, 0, 0.8, 1], // Easing.Linear,
+        },
+      }
     }
   ),
   state<WindowPlugArrowElement>(({ $, effect, reduce }) => {
     const { render } = jsx($)
+    const { ref } = refs($)
 
-    effect(({ host, rect }) => dataset(host, rect.toJSON()))
+    effect(({ host, rect }) => {
+      dataset(host, rect.toJSON())
+      dispatch.composed.bubbles(host, 'change')
+    })
 
     effect(({ host }) => {
       host.style.pointerEvents = 'none'
     })
 
-    $.path = reduce(({ rect, points, step }) => {
-      const rn = rect.pos.negate()
+    $.offset = reduce(({ rect }) => rect.pos.negate())
+
+    $.anim = reduce(({ animSettings, atRest }) => createStepAnimation(animSettings[atRest ? 'rest' : 'quick'], $.anim))
+
+    $.animValues = reduce(({ anim: { set }, points, rect }) =>
+      set({
+        rect,
+        points: points.map(x => x.translate(rect.pos.negate())),
+      })
+    )
+
+    $.animValues = reduce.raf.desync(({ anim: { t, from, to, update }, animValues: _ }) => {
+      // const flen = from.points.length
+      // const tlen = to.points.length
+      // const coeff = flen / tlen
+      return update({
+        rect: from.rect.interpolate(to.rect, t),
+        points: Polygon.morph(Morph.Nearest, from.points, to.points, t),
+        // to.points.map((x, i) => {
+        //   const fp = from.points[i * coeff | 0]
+        //   if (fp) return fp.interpolate(x, t)
+        //   else return x
+        // }),
+      })
+    })
+
+    effect.raf.desync(({ host, animValues, getSaSb, rect, step }) => {
+      const [sa, sb] = getSaSb().map(x => x.sub(rect.pos))
+      let points = [sb, ...animValues.points.slice(1, -1), sa]
+      // points = Polygon.rope(points, 0.18)
+      // points = Polygon.chop(points, 50, 100)
+      $.animPath = roundCorners(
+        Polygon.toSVGPath(points),
+        step * 10
+      ).path
+      Object.assign(host.style, animValues.rect.toStyle())
+    })
+    // effect(({ rect, points, step }) => {
+    //   try {
+    //     const rn = rect.pos.negate()
+
+    //     const nextPath = roundCorners(Point.toSVGPath(points.map(x => x.translate(rn))), step).path
+
+    //     if (!$.animPath) {
+    //       $.animPath = nextPath
+    //     } else {
+    //       const from = $.animPath
+    //       const to = nextPath
+
+    //       tweenPaths({
+    //         duration: 1000,
+    //         from,
+    //         to,
+    //         next: (d: string) => {
+    //           $.animPath = d // path.setAttribute('d', d)
+    //         },
+    //       })
+
+    //       // tweenSvgPath(from, to, 1000).onUpdate(newPath => {
+    //       //   $.animPath = newPath
+    //       // })
+    //     }
+    //   } catch {}
+    // })
+
+    $.path = reduce(({ animPath: path }) => {
       // return Point.toSVGPath(
       //   chunk(
       //     ShapePoints.bezierCurveThrough(
@@ -56,21 +151,32 @@ export class WindowPlugArrowElement extends mixter(
       //     2
       //   ).map(([x, y]) => new Point(x, y))
       // )
-      return roundCorners(
-        Point.toSVGPath(
-          points.map(x => x.translate(rn))
-        ),
-        step * 4
-      ).path
+      // const path = roundCorners(animPath, step).path
+
+      if (path.includes('NaN')) {
+        return $.path
+      }
+
+      return path
     })
 
-    render(({ color, path, rect }) => (
+    effect(({ rect, svg }) => {
+      svg.setAttribute('width', '' + rect.width)
+      svg.setAttribute('height', '' + rect.height)
+    })
+
+    effect(({ path, svgPath }) => {
+      svgPath.setAttribute('d', path)
+    })
+
+    render.once(({ color, path, rect }) => (
       <>
         <style>
           {/*css*/ `
           :host {
             display: inline-flex;
             contain: size layout style paint;
+            /* transition: all 90ms linear; */
             z-index: 0;
           }
           svg {
@@ -84,8 +190,9 @@ export class WindowPlugArrowElement extends mixter(
           }
         `}
         </style>
-        <svg width={rect.width} height={rect.height}>
+        <svg ref={ref.svg} width={rect.width} height={rect.height}>
           <path
+            ref={ref.svgPath}
             stroke-width={7.5}
             pointer-events="painted"
             fill="none"
@@ -97,12 +204,6 @@ export class WindowPlugArrowElement extends mixter(
   })
 ) {}
 
-export interface Arrow {
-  step: number
-  rect: Rect
-  points: Point[]
-}
-
 export class WindowPlugScene extends EventTarget {
   arrows?: Arrow[]
   plugs = new Map<WindowPlugElement, WindowPlugContext>()
@@ -113,24 +214,40 @@ export class WindowPlugScene extends EventTarget {
   endPointerMove?: () => void
   onchange?: EventHandler<WindowPlugScene, CustomEvent>
   onhover?: EventHandler<WindowPlugScene, CustomEvent<WindowPlugElement>>
+  worker = createWindowPlugWorker()
+  cache = new Map()
+  options!: WindowPlugSolveOptions
+  ids = new Map()
 
   constructor(public surface: SurfaceElement) {
     super()
   }
 
-  solve(options: { step: number; separation: number; distance: number; heuristic: number }) {
+  async updateOptions(options: WindowPlugSolveOptions) {
+    this.options = options
+    await this.worker.updateOptions(options)
+  }
+
+  async updateData() {
+    const viewRect = this.surface.viewRect!.clone()
+    const viewFrameRect = this.surface.viewFrameRect!.transform(this.surface.viewMatrix.inverse())
+    const rects = [...this.plugs.keys()].map(x => Rect.fromElement(x.target!))
+    await this.worker.updateData({ viewRect, viewFrameRect, rects })
+  }
+
+  async clearAndSolve() {
+    this.cache.clear()
+    await this.updateData()
+    return await this.solve()
+  }
+
+  async solve() {
+    const { ids } = this
+
     console.time('solve')
-
-    const { step } = options
-
-    const halfStep = step * 0.5
-
-    // let bounds: Rect
-
-    const zoomedView = this.surface.viewRect!.zoomLinear(400)
-
-    const rects = [...this.plugs.keys()]
-      .map(x => Rect.fromElement(x.target!).zoomLinear(step * 1.18))
+    // console.time('start')
+    this.worker.start()
+    // console.timeEnd('start')
 
     const arrows: Arrow[] = []
     const visited = new Set<Cable>()
@@ -138,120 +255,11 @@ export class WindowPlugScene extends EventTarget {
     const outsMap = new Map()
     const insMap = new Map()
 
-    const intersects = (a: Point, b: Point) => {
-      const line = new Line(a, b)
-      for (const rect of rects) {
-        if (line.intersectsRect(rect)) return true
-      }
-      return false
-    }
-
-    const acceptTolerance = 5 * step
-
-    const strategies: Strategy<Point>[] = [
-      {
-        accept: (a, b) => !intersects(a, b) && a.manhattan(b) <= acceptTolerance,
-        distance: [Heuristics.Manhattan, 0.25],
-        heuristic: [Heuristics.Manhattan, 0.2],
-        maxIterations: 20,
-      },
-      {
-        accept: (a, b) => !intersects(a, b) && a.manhattan(b) <= acceptTolerance,
-        distance: [Heuristics.Manhattan, 0.25],
-        heuristic: [Heuristics.Chebyshev, 50],
-        maxIterations: 20,
-      },
-      {
-        accept: (a, b) => a.manhattan(b) <= acceptTolerance,
-        distance: [Heuristics.Manhattan, 0.25],
-        heuristic: [Heuristics.Chebyshev, 50],
-        maxIterations: 50,
-      },
-    ]
-
-    const getArrow = (sa: Point, sb: Point) => {
-      const pa = sa.translate(halfStep, 0)
-      const pb = sb.translate(-halfStep, 0)
-
-      let points: Point[] = []
-
-      if (sa.distance(sb) > 150) {
-        points = findShortestPath({
-          start: pa,
-          goal: pb,
-          hash: p => p.gridRound(step).toString(),
-          strategies,
-          neighbors(p) {
-            return [
-              // TODO: we can try the shortest directions first
-              p.translate(+step, +step),
-              p.translate(+step, -step),
-              p.translate(-step, +step),
-              p.translate(-step, -step),
-
-              p.translate(+step, 0),
-              p.translate(0, +step),
-              p.translate(-step, 0),
-              p.translate(0, -step),
-              //
-              p.translate(+halfStep, +halfStep),
-              p.translate(+halfStep, -halfStep),
-              p.translate(-halfStep, +halfStep),
-              p.translate(-halfStep, -halfStep),
-
-              p.translate(+halfStep, 0),
-              p.translate(0, +halfStep),
-              p.translate(-halfStep, 0),
-              p.translate(0, -halfStep),
-            ]
-              .filter(p => p.withinRect(zoomedView!))
-              .filter(n => {
-                // if (n.manhattan(pb) > step * 40)
-                for (const arrow of arrows) {
-                  for (const a of arrow.points) {
-                    if (n.manhattan(a) <= step * options.separation) return false
-                  }
-                }
-
-                return !intersects(p, n)
-              })
-          },
-        })
-      }
-
-      points = [sb, ...points, sa]
-
-      const topLeft = new Point(Infinity, Infinity)
-      const bottomRight = new Point(-Infinity, -Infinity)
-
-      for (const p of points) {
-        if (p.x < topLeft.x) topLeft.x = p.x
-        if (p.x > bottomRight.x) bottomRight.x = p.x
-        if (p.y < topLeft.y) topLeft.y = p.y
-        if (p.y > bottomRight.y) bottomRight.y = p.y
-      }
-
-      const rect = new Rect(
-        topLeft.x,
-        topLeft.y,
-        bottomRight.x - topLeft.x,
-        bottomRight.y - topLeft.y
-      ).zoomLinearSelf(150)
-
-      const arrow = {
-        step,
-        rect,
-        points,
-      }
-
-      return arrow
-    }
-
     if (!this.holding)
       for (const plugEl of this.plugs.keys()) {
-        plugEl.plug!.cables.forEach((plug, cable) => {
-          if (plug.plugKind !== Plug.Input) return
-          if (visited.has(cable)) return
+        for (const [cable, plug] of plugEl.plug!.cables.entries()) {
+          if (plug.plugKind !== Plug.Input) continue
+          if (visited.has(cable)) continue
           visited.add(cable)
 
           const otherEl = this.plugsMap.get(plug)!
@@ -276,38 +284,65 @@ export class WindowPlugScene extends EventTarget {
             ins = insMap.get(b)!
           }
 
-          a.updateRect()
-          b.updateRect()
-
-          // bounds = Rect.combine([a.rect, b.rect]).zoomLinear(step * 8)
-
           outs.push(b)
           ins.push(a)
 
-          const sa = new Point(
-            a.rect.right,
-            a.rect.y + outs.length * 50 - 25
-          )
+          const getSaSb = ((outsCount: number, insCount: number) =>
+            () => {
+              a.updateRect()
+              b.updateRect()
 
-          const sb = new Point(
-            b.rect.left,
-            b.rect.y + ins.length * 50 - 25
-          )
+              // bounds = Rect.combine([a.rect, b.rect]).zoomLinear(step * 8)
+
+              const sa = new Point(
+                a.rect.right,
+                a.rect.y + outsCount * 50 - 25
+              )
+
+              const sb = new Point(
+                b.rect.left,
+                b.rect.y + insCount * 50 - 25
+              )
+
+              return [sa, sb] as const
+            })(outs.length, ins.length)
 
           // const pa = sa.translate(outs.length * step / 3, 0) // .gridRound(step)
           // const pb = sb.translate(-ins.length * step / 3, 0) // .gridRound(step)
 
-          const arrow = getArrow(sa, sb)
-
+          // console.time('arrow')
+          // const key = [sa, sb].join('')
+          // let arrow
+          // if (this.cache.has(key)) {
+          //   arrow = this.cache.get(key)
+          //   this.worker.pushArrow(arrow)
+          // } else {
+          const arrow = await this.worker.getArrow(...getSaSb())
+          // this.cache.set(key, arrow)
+          // }
+          // console.timeEnd('arrow')
+          // console.log('GOT ARROW', arrow)
+          let id
+          if (ids.has(cable)) {
+            id = ids.get(cable)
+          } else {
+            id = (Math.random() * 10e7 | 0).toString(36)
+            ids.set(cable, id)
+          }
+          arrow.id = id
+          arrow.getSaSb = getSaSb
+          arrow.targets = [a, b]
           arrows.push(arrow)
-        })
+        }
       }
 
     if (this.holding) {
       const points = [this.holding.plug.rect.center, this.holding.target] as const
       const arrow = {
-        step: options.step,
+        id: 'holding',
+        step: this.options.step,
         rect: Rect.fromUnsortedPoints(...points),
+        getSaSb: () => points,
         points: points as any,
       }
       arrows.push(...this.arrows!, arrow)
