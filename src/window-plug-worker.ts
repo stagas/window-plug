@@ -1,13 +1,14 @@
 import { Bob } from 'alice-bob'
 import { findShortestPath, Heuristics, Strategy } from 'find-shortest-path'
-import { Line, Point, Rect } from 'geometrik'
-import type { Arrow, WindowPlugSolveData, WindowPlugSolveOptions } from './types'
-import { receive, send } from './window-plug-core'
+import { Line, Point, Polygon, Rect } from 'geometrik'
+
+import type { WindowPlugSolveData, WindowPlugSolveOptions } from './types'
+import { agentOptions } from './window-plug-core'
 import type { WindowPlugCore } from './window-plug-core'
 
 export class WindowPlugWorker {
   options!: WindowPlugSolveOptions
-  arrows: Arrow[] = []
+  arrows = new Map<string, Polygon>()
   rects: Rect[] = []
   viewRect: Rect = new Rect()
   viewFrameRect: Rect = new Rect()
@@ -28,76 +29,87 @@ export class WindowPlugWorker {
 
   async updateData(data: WindowPlugSolveData) {
     const { step } = this.options
-    this.viewRect = data.viewRect.zoomLinear(200)
-    this.viewFrameRect = data.viewFrameRect
-    this.rects = data.rects.map(x => x.zoomLinearSelf(this.options.step * 1.18))
-    const acceptTolerance = 5 * step
+
+    // optimization: bound points in this rect
+    this.viewRect = data.viewRect.zoomLinear(400)
+
+    // give rectangles some margin from the points
+    this.rects = data.destRects.map(x => x.zoomLinearSelf(this.options.step * 1.18))
+
+    const acceptTolerance = 4 * step
 
     this.strategies = [
       {
         accept: (a, b) => !this.intersects(a, b) && a.manhattan(b) <= acceptTolerance,
         distance: [Heuristics.Manhattan, 0.25],
         heuristic: [Heuristics.Manhattan, 0.2],
-        maxIterations: 20,
+        maxIterations: 80,
       },
       {
         accept: (a, b) => !this.intersects(a, b) && a.manhattan(b) <= acceptTolerance,
         distance: [Heuristics.Manhattan, 0.25],
         heuristic: [Heuristics.Chebyshev, 50],
-        maxIterations: 20,
+        maxIterations: 80,
       },
       {
         accept: (a, b) => a.manhattan(b) <= acceptTolerance,
         distance: [Heuristics.Manhattan, 0.25],
         heuristic: [Heuristics.Chebyshev, 50],
-        maxIterations: 130,
+        maxIterations: 300,
       },
     ]
   }
 
   async start() {
-    this.arrows = []
+    this.arrows.clear()
   }
 
   hash = (p: Point) => {
+    // TODO: try different hash step / 2 etc
     return p.gridRound(this.step).toString()
   }
 
-  // async pushArrow(arrow: Arrow) {
-  //   this.arrows.push(arrow)
-  // }
-
-  async getArrow(sa: Point, sb: Point): Promise<Arrow> {
-    const { viewRect, viewFrameRect, strategies } = this
+  async getArrowPolygon(
+    id: string,
+    outPoint: Point,
+    startPoint: Point,
+    goalPoint: Point,
+    inPoint: Point,
+  ): Promise<Polygon> {
+    const { viewRect, strategies } = this
     const { step, separation } = this.options
     const halfStep = step * 0.5
-    // const doubleStep = step * 1.5
 
-    const pa = sa.translate(halfStep, 0)
-    const pb = sb.translate(-halfStep, 0)
+    const arrows = [...this.arrows.values()]
 
     let points: Point[] = []
 
-    if (sa.distance(sb) > 150) {
+    if (outPoint.distance(inPoint) > 150) {
       points = findShortestPath({
-        start: pa,
-        goal: pb,
+        start: startPoint,
+        goal: goalPoint,
         hash: this.hash,
         strategies,
         neighbors: p => {
+          // TODO: prefer first those neighbors that are in the same direction as last.p->p
+          //   this better lives in find-shortest-path
+
           const neighbors: Point[] = []
-          out:
+          // out:
           for (const s of [step, halfStep]) {
             for (const x of [1, -1, 0]) {
               next:
               for (const y of [1, -1, 0]) {
-                if (neighbors.length === 6) break out
+                // if (neighbors.length === 6) break out
 
                 const n = p.translate(x * s, y * s)
                 if (n.withinRect(viewRect)) {
-                  for (const arrow of this.arrows) {
+                  for (const arrow of arrows) {
                     for (const a of arrow.points) {
-                      if (n.manhattan(a) <= step * separation) continue next
+                      const dist = n.manhattan(a)
+                      if (dist <= step * separation) {
+                        continue next
+                      }
                     }
                   }
                   if (!this.intersects(p, n)) {
@@ -112,32 +124,17 @@ export class WindowPlugWorker {
       })
     }
 
-    points = [sb, ...points, sa]
+    points = [
+      outPoint,
+      startPoint,
+      ...points.slice(1, -1),
+      goalPoint,
+      inPoint,
+    ]
 
-    const topLeft = new Point(Infinity, Infinity)
-    const bottomRight = new Point(-Infinity, -Infinity)
+    const arrow = new Polygon(points)
 
-    for (const p of points) {
-      if (p.x < topLeft.x) topLeft.x = p.x
-      if (p.x > bottomRight.x) bottomRight.x = p.x
-      if (p.y < topLeft.y) topLeft.y = p.y
-      if (p.y > bottomRight.y) bottomRight.y = p.y
-    }
-
-    // const rect = new Rect(
-    //   topLeft.x,
-    //   topLeft.y,
-    //   bottomRight.x - topLeft.x,
-    //   bottomRight.y - topLeft.y
-    // ).zoomLinearSelf(250)
-
-    const arrow: Arrow = {
-      step,
-      rect: viewFrameRect,
-      points,
-    }
-
-    this.arrows.push(arrow)
+    this.arrows.set(id, arrow)
 
     return arrow
   }
@@ -146,8 +143,8 @@ export class WindowPlugWorker {
 const plugWorker = new WindowPlugWorker()
 
 const [worker] = new Bob<WindowPlugWorker, WindowPlugCore>(
-  data => void self.postMessage(send(data)),
+  data => void self.postMessage(data),
   plugWorker
-).agents({ debug: false })
+).agents(agentOptions)
 
-self.onmessage = ({ data }) => worker.receive(receive(data))
+self.onmessage = ({ data }) => worker.receive(data)
