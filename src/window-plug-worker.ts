@@ -140,11 +140,13 @@ export class WindowPlugWorker {
   }
 }
 
-const plugWorker = new WindowPlugWorker()
+setTimeout(() => {
+  const plugWorker = new WindowPlugWorker()
 
-const [worker] = new Bob<WindowPlugWorker, WindowPlugCore>(
-  data => void self.postMessage(data),
-  plugWorker
-).agents(agentOptions)
+  const [worker] = new Bob<WindowPlugWorker, WindowPlugCore>(
+    data => void self.postMessage(data),
+    plugWorker
+  ).agents(agentOptions)
 
-self.onmessage = ({ data }) => worker.receive(data)
+  self.onmessage = ({ data }) => worker.receive(data)
+})
